@@ -19,7 +19,10 @@ class PortfolioManager:
         """Initialize portfolio manager."""
         self.config = load_json(config_path)
         self.config_path = config_path
-        self.client = coinbase_client or CoinbaseClient()
+
+        # Extract portfolio_id from config and pass to CoinbaseClient
+        portfolio_id = self.config.get('portfolio_id')
+        self.client = coinbase_client or CoinbaseClient(portfolio_id=portfolio_id)
         self.tx_logger = transaction_logger or TransactionLogger()
         self.optimizer = TradeOptimizer()
         self.logger = logging.getLogger(__name__)

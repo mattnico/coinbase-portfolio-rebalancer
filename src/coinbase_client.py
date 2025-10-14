@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 class CoinbaseClient:
     """Wrapper for Coinbase Advanced Trade API."""
 
-    def __init__(self, api_key: Optional[str] = None, api_secret: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, api_secret: Optional[str] = None, portfolio_id: Optional[str] = None):
         """Initialize Coinbase client with API credentials."""
         # Load .env from config directory
         from pathlib import Path
@@ -19,7 +19,8 @@ class CoinbaseClient:
 
         self.api_key = api_key or os.getenv('COINBASE_API_KEY')
         self.api_secret = api_secret or os.getenv('COINBASE_API_SECRET')
-        self.portfolio_id = os.getenv('COINBASE_PORTFOLIO_ID')
+        # Portfolio ID now comes from config parameter (not .env)
+        self.portfolio_id = portfolio_id
 
         if not self.api_key or not self.api_secret:
             raise ValueError("API credentials not found. Set COINBASE_API_KEY and COINBASE_API_SECRET")

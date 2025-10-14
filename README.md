@@ -81,10 +81,17 @@ To get API keys:
 
 3. **Configure your portfolio:**
 
-Edit `config/portfolio.json` to set your desired allocation:
+Copy the example configuration file:
+
+```bash
+cp config/portfolio.json.example config/portfolio.json
+```
+
+Edit `config/portfolio.json` and add your portfolio ID and desired allocation:
 
 ```json
 {
+  "portfolio_id": "your-portfolio-id-here",
   "target_allocation": {
     "BTC": 40.0,
     "ETH": 30.0,
@@ -95,7 +102,8 @@ Edit `config/portfolio.json` to set your desired allocation:
     "threshold_percent": 5.0,
     "min_trade_value_usd": 10.0,
     "dry_run": true,
-    "prefer_direct_routes": true
+    "prefer_direct_routes": true,
+    "handle_unknown_assets": "sell"
   },
   "schedule": {
     "interval_hours": 24,
@@ -104,14 +112,20 @@ Edit `config/portfolio.json` to set your desired allocation:
 }
 ```
 
+To get your portfolio ID:
+- Go to Coinbase and navigate to your portfolio
+- The portfolio ID is in the URL: `https://www.coinbase.com/portfolio/{PORTFOLIO_ID}`
+- Or leave blank/null to use your default portfolio
+
 **Configuration Options:**
 
+- `portfolio_id`: Coinbase portfolio ID (optional - uses default portfolio if not specified)
 - `target_allocation`: Desired percentage allocation for each asset (must sum to 100%)
 - `threshold_percent`: Minimum deviation percentage to trigger rebalancing
 - `min_trade_value_usd`: Minimum trade value in USD (prevents tiny trades)
 - `dry_run`: If true, simulates trades without executing them
 - `prefer_direct_routes`: Use direct trading pairs (BTC-ETH) instead of routing through USD (default: true)
-- `handle_unknown_assets`: **NEW** - What to do with assets not in target allocation: `"sell"` (default) or `"ignore"`
+- `handle_unknown_assets`: What to do with assets not in target allocation: `"sell"` (default) or `"ignore"`
 - `interval_hours`: Hours between rebalancing attempts
 - `enabled`: Enable/disable scheduled rebalancing
 
@@ -410,11 +424,38 @@ If you encounter rate limit errors, the bot will log them. Consider:
 
 ### Multiple Portfolios
 
-To manage multiple portfolios, create separate configuration files:
+To manage multiple portfolios, create separate configuration files with different `portfolio_id` values:
 
+**Example: Conservative Portfolio** (`config/portfolio_conservative.json`):
+```json
+{
+  "portfolio_id": "portfolio-1-id-here",
+  "target_allocation": {
+    "BTC": 30.0,
+    "ETH": 30.0,
+    "USDC": 40.0
+  },
+  ...
+}
+```
+
+**Example: Aggressive Portfolio** (`config/portfolio_aggressive.json`):
+```json
+{
+  "portfolio_id": "portfolio-2-id-here",
+  "target_allocation": {
+    "BTC": 50.0,
+    "ETH": 40.0,
+    "SOL": 10.0
+  },
+  ...
+}
+```
+
+Then run them separately:
 ```bash
-python -m src.main --config config/portfolio_conservative.json
-python -m src.main --config config/portfolio_aggressive.json
+python -m src.main --config config/portfolio_conservative.json --mode once
+python -m src.main --config config/portfolio_aggressive.json --mode once
 ```
 
 ### Custom Scheduling

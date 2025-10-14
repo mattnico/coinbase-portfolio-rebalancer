@@ -2,6 +2,9 @@
 config/.env
 .env
 
+# Portfolio configuration (contains portfolio ID)
+config/portfolio.json
+
 # Transaction data and logs
 data/transactions.json
 data/transactions_backup_*.json
