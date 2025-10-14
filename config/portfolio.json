@@ -1,0 +1,19 @@
+{
+  "target_allocation": {
+    "BTC": 30.0,
+    "ETH": 40.0,
+    "SOL": 20.0,
+    "USDC": 10.0
+  },
+  "rebalancing": {
+    "threshold_percent": 2.5,
+    "min_trade_value_usd": 1.0,
+    "dry_run": false,
+    "prefer_direct_routes": true,
+    "handle_unknown_assets": "sell"
+  },
+  "schedule": {
+    "interval_hours": 24,
+    "enabled": true
+  }
+}
