@@ -1,0 +1,44 @@
+{
+  "portfolios": {
+    "Top_Three": {
+      "description": "Focus on top 3 assets - previous winner with 1499% return",
+      "BTC": 40.0,
+      "ETH": 40.0,
+      "SOL": 20.0,
+      "USDC": 0.0,
+      "DOGE": 0.0,
+      "AVAX": 0.0,
+      "XLM": 0.0
+    },
+    "Aggressive": {
+      "description": "No stablecoins - 1391% return",
+      "BTC": 35.0,
+      "ETH": 35.0,
+      "SOL": 25.0,
+      "USDC": 0.0,
+      "DOGE": 5.0,
+      "AVAX": 0.0,
+      "XLM": 0.0
+    },
+    "BTC_Dominant": {
+      "description": "Bitcoin-heavy - 1145% return, best Sharpe",
+      "BTC": 50.0,
+      "ETH": 25.0,
+      "SOL": 10.0,
+      "USDC": 10.0,
+      "DOGE": 0.0,
+      "AVAX": 5.0,
+      "XLM": 0.0
+    },
+    "Current": {
+      "description": "Your current balanced allocation - 927% return",
+      "BTC": 25.0,
+      "ETH": 30.0,
+      "SOL": 20.0,
+      "USDC": 10.0,
+      "DOGE": 5.0,
+      "AVAX": 5.0,
+      "XLM": 5.0
+    }
+  }
+}

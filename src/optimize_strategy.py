@@ -20,7 +20,11 @@ import argparse
 import logging
 import json
 import sys
+import warnings
 from datetime import datetime, timedelta
+
+# Suppress urllib3 OpenSSL warnings
+warnings.filterwarnings('ignore', message='urllib3 v2 only supports OpenSSL')
 from pathlib import Path
 
 from src.coinbase_client import CoinbaseClient
