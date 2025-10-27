@@ -385,10 +385,10 @@ def main():
     while current_date + timedelta(days=args.window_days) <= end_date:
         window_end = current_date + timedelta(days=args.window_days)
 
-        # Get prices for this window
+        # Get prices for this window (reference_prices is list of (timestamp, price) tuples)
         window_prices = [
             p for p in reference_prices
-            if current_date <= p.timestamp <= window_end
+            if current_date <= p[0] <= window_end  # p[0] is timestamp
         ]
 
         if len(window_prices) >= args.window_days:
@@ -407,8 +407,9 @@ def main():
         if i % 10 == 0:
             print(f"  Progress: {i}/{len(windows)} windows analyzed...")
 
-        prices = [p.close for p in window_prices]
-        timestamps = [p.timestamp for p in window_prices]
+        # Extract prices and timestamps from tuples
+        prices = [p[1] for p in window_prices]  # p is (timestamp, price)
+        timestamps = [p[0] for p in window_prices]
 
         # Determine ground truth based on simple heuristics
         # (In real implementation, this would come from rolling optimization results)

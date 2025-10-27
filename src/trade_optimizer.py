@@ -26,7 +26,8 @@ class TradeOptimizer:
         to_sell: Dict[str, float],  # {asset: value_to_sell_usd}
         to_buy: Dict[str, float],   # {asset: value_to_buy_usd}
         available_pairs: Dict[str, bool],  # Available trading pairs
-        prefer_direct: bool = True
+        prefer_direct: bool = True,
+        stable_currency: str = 'USDC'  # Preferred stablecoin for routing
     ) -> List[Dict]:
         """
         Calculate optimal trade routes to minimize fees.
@@ -35,7 +36,8 @@ class TradeOptimizer:
             to_sell: Assets to sell with USD values
             to_buy: Assets to buy with USD values
             available_pairs: Available trading pairs on exchange
-            prefer_direct: Whether to prefer direct trades over USD routing
+            prefer_direct: Whether to prefer direct trades over stablecoin routing
+            stable_currency: Stablecoin to use for routing (default: USDC)
 
         Returns:
             List of optimized trade dictionaries
@@ -49,6 +51,7 @@ class TradeOptimizer:
         self.logger.info("Starting trade optimization")
         self.logger.info(f"Assets to sell: {list(remaining_sells.keys())}")
         self.logger.info(f"Assets to buy: {list(remaining_buys.keys())}")
+        self.logger.info(f"Routing stablecoin: {stable_currency}")
 
         # Step 1: Find direct trading pair opportunities
         if prefer_direct:
@@ -75,11 +78,13 @@ class TradeOptimizer:
                     if remaining_buys[to_asset] <= 0:
                         del remaining_buys[to_asset]
 
-        # Step 2: Route remaining trades through USD
-        usd_routed_trades = self._route_through_usd(remaining_sells, remaining_buys)
-        trades.extend(usd_routed_trades)
+        # Step 2: Route remaining trades through stablecoin
+        stable_routed_trades = self._route_through_stable(
+            remaining_sells, remaining_buys, stable_currency, available_pairs
+        )
+        trades.extend(stable_routed_trades)
 
-        self.logger.info(f"Added {len(usd_routed_trades)} USD-routed trades")
+        self.logger.info(f"Added {len(stable_routed_trades)} {stable_currency}-routed trades")
         self.logger.info(f"Total optimized trades: {len(trades)}")
 
         # Calculate savings
@@ -122,16 +127,29 @@ class TradeOptimizer:
                     # Determine trade direction based on pair format
                     base, quote = pair_format.split('-')
 
+                    # Validate that this trade won't create conflicts
+                    # Case 1: If sell_asset is the base, we SELL it (simple case)
+                    # Case 2: If sell_asset is the quote, we BUY the base using sell_asset
+                    #         BUT this only works if sell_asset appears ONLY in the buy list
+                    #         (meaning we're not also trying to sell it elsewhere)
+
                     if base == sell_asset:
-                        # Selling base, buying quote
+                        # Selling base, buying quote - straightforward
                         side = 'SELL'
                         from_asset = sell_asset
                         to_asset = buy_asset
+                    elif quote == sell_asset:
+                        # We would buy base using sell_asset as quote
+                        # Skip this if sell_asset is being sold (creates conflict)
+                        # This trade would require spending sell_asset, but we're trying to sell it
+                        self.logger.debug(
+                            f"Skipping {pair_format}: would require spending {sell_asset} "
+                            f"but {sell_asset} is being sold"
+                        )
+                        continue
                     else:
-                        # Buying base, selling quote
-                        side = 'BUY'
-                        from_asset = sell_asset
-                        to_asset = buy_asset
+                        # Neither base nor quote matches sell_asset (shouldn't happen)
+                        continue
 
                     direct_trades.append({
                         'type': 'direct',
@@ -151,49 +169,76 @@ class TradeOptimizer:
 
         return direct_trades
 
-    def _route_through_usd(
+    def _route_through_stable(
         self,
         to_sell: Dict[str, float],
-        to_buy: Dict[str, float]
+        to_buy: Dict[str, float],
+        stable_currency: str,
+        available_pairs: Dict[str, bool]
     ) -> List[Dict]:
         """
-        Create trades routed through USD for remaining amounts.
+        Create trades routed through a stablecoin for remaining amounts.
 
         Args:
             to_sell: Remaining assets to sell
             to_buy: Remaining assets to buy
+            stable_currency: Stablecoin to route through (e.g., 'USDC', 'USD', 'USDT')
+            available_pairs: Available trading pairs
 
         Returns:
-            List of USD-routed trades
+            List of stablecoin-routed trades
         """
         trades = []
+        stablecoins = ['USD', 'USDC', 'USDT']
 
-        # Create sell orders (ASSET → USD)
+        # Create sell orders (ASSET → STABLE)
         for asset, value in to_sell.items():
-            if value > 0 and asset not in ['USD', 'USDC']:
+            if value > 0 and asset not in stablecoins:
+                # Try to find the best pair (prefer stable_currency, fallback to USD)
+                pair_format = self._get_pair_format(asset, stable_currency, available_pairs)
+
+                if not pair_format:
+                    # Fallback to USD if stable_currency pair doesn't exist
+                    self.logger.warning(f"No {asset}-{stable_currency} pair found, falling back to {asset}-USD")
+                    pair_format = f"{asset}-USD"
+                    routing_stable = 'USD'
+                else:
+                    routing_stable = stable_currency
+
                 trades.append({
-                    'type': 'usd_sell',
+                    'type': 'stable_sell',
                     'from_asset': asset,
-                    'to_asset': 'USD',
-                    'product_id': f"{asset}-USD",
+                    'to_asset': routing_stable,
+                    'product_id': pair_format,
                     'side': 'SELL',
                     'value_usd': value,
                     'is_direct': False,
-                    'reason': f"Sell {asset} to USD"
+                    'reason': f"Sell {asset} to {routing_stable}"
                 })
 
-        # Create buy orders (USD → ASSET)
+        # Create buy orders (STABLE → ASSET)
         for asset, value in to_buy.items():
-            if value > 0 and asset not in ['USD', 'USDC']:
+            if value > 0 and asset not in stablecoins:
+                # Try to find the best pair (prefer stable_currency, fallback to USD)
+                pair_format = self._get_pair_format(asset, stable_currency, available_pairs)
+
+                if not pair_format:
+                    # Fallback to USD if stable_currency pair doesn't exist
+                    self.logger.warning(f"No {asset}-{stable_currency} pair found, falling back to {asset}-USD")
+                    pair_format = f"{asset}-USD"
+                    routing_stable = 'USD'
+                else:
+                    routing_stable = stable_currency
+
                 trades.append({
-                    'type': 'usd_buy',
-                    'from_asset': 'USD',
+                    'type': 'stable_buy',
+                    'from_asset': routing_stable,
                     'to_asset': asset,
-                    'product_id': f"{asset}-USD",
+                    'product_id': pair_format,
                     'side': 'BUY',
                     'value_usd': value,
                     'is_direct': False,
-                    'reason': f"Buy {asset} with USD"
+                    'reason': f"Buy {asset} with {routing_stable}"
                 })
 
         return trades

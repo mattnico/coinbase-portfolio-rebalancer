@@ -78,9 +78,11 @@ class PortfolioManager:
         handle_unknown = self.config['rebalancing'].get('handle_unknown_assets', 'sell')
 
         # Identify unknown assets (not in target allocation)
+        # Note: USD and USDC are treated as stable currencies, but if they're not in the
+        # target allocation, they should still be sold/redistributed like any other asset
         unknown_assets = {}
         for asset, value in current_values.items():
-            if asset not in target_allocation and asset not in ['USD', 'USDC']:
+            if asset not in target_allocation:
                 unknown_assets[asset] = value
 
         if unknown_assets:
@@ -147,12 +149,23 @@ class PortfolioManager:
         # Get available trading pairs
         available_pairs = self.client.get_available_trading_pairs()
 
+        # Detect which stablecoin is in the target allocation (prefer USDC > USDT > USD)
+        stable_currency = 'USDC'  # Default
+        stablecoins = ['USDC', 'USDT', 'USD']
+        for stable in stablecoins:
+            if stable in target_allocation:
+                stable_currency = stable
+                break
+
+        self.logger.info(f"Using {stable_currency} for trade routing")
+
         # Use optimizer to find best trade routes
         optimized_trades = self.optimizer.calculate_optimal_trades(
             to_sell=to_sell_dict,
             to_buy=to_buy_dict,
             available_pairs=available_pairs,
-            prefer_direct=prefer_direct
+            prefer_direct=prefer_direct,
+            stable_currency=stable_currency
         )
 
         # Get current balances and prices for size calculations
@@ -324,9 +337,17 @@ class PortfolioManager:
                     'portfolio_value': total_value
                 }
 
+            # Reorder trades: execute SELL orders before BUY orders
+            # This ensures that assets being sold are available before trying to buy with them
+            sell_trades = [t for t in trades if t['action'] == 'SELL']
+            buy_trades = [t for t in trades if t['action'] == 'BUY']
+            ordered_trades = sell_trades + buy_trades
+
+            self.logger.info(f"Executing {len(sell_trades)} SELL orders followed by {len(buy_trades)} BUY orders")
+
             # Execute trades
             results = []
-            for trade in trades:
+            for trade in ordered_trades:
                 result = self.execute_trade(trade, dry_run=dry_run)
                 results.append(result)
 

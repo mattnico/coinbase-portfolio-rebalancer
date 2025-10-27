@@ -32,6 +32,10 @@ class CoinbaseClient:
         self._trading_pairs_cache: Optional[Dict[str, bool]] = None
         self._cache_timestamp: Optional[float] = None
 
+        # Cache for product details (including precision info)
+        self._product_details_cache: Dict[str, Dict] = {}
+        self._product_cache_timestamp: Optional[float] = None
+
     def get_accounts(self) -> Dict[str, float]:
         """
         Get all account balances.
@@ -157,6 +161,9 @@ class CoinbaseClient:
             self.logger.info(f"Placing {side} order for {product_id}: "
                            f"size={size}, quote_size={quote_size}")
 
+            # Get product details for precision
+            product_details = self.get_product_details(product_id)
+
             # Build parameters for market_order call
             order_params = {
                 "client_order_id": client_order_id,
@@ -168,13 +175,19 @@ class CoinbaseClient:
             if self.portfolio_id:
                 order_params["retail_portfolio_id"] = self.portfolio_id
 
-            # Add size parameters (round to 2 decimal places for USD/USDC quote sizes)
+            # Add size parameters with proper precision rounding
             if size:
-                order_params["base_size"] = str(size)
+                # Round base_size according to product's base_increment
+                base_increment = product_details.get('base_increment', '0.00000001')
+                rounded_size = self.round_size_to_increment(size, base_increment)
+                order_params["base_size"] = rounded_size
+                self.logger.debug(f"Rounded base_size from {size} to {rounded_size} (increment: {base_increment})")
             elif quote_size:
-                # Round quote_size to 2 decimal places for USDC/USD pairs
-                rounded_quote_size = round(float(quote_size), 2)
-                order_params["quote_size"] = str(rounded_quote_size)
+                # Round quote_size according to product's quote_increment
+                quote_increment = product_details.get('quote_increment', '0.01')
+                rounded_quote_size = self.round_size_to_increment(quote_size, quote_increment)
+                order_params["quote_size"] = rounded_quote_size
+                self.logger.debug(f"Rounded quote_size from {quote_size} to {rounded_quote_size} (increment: {quote_increment})")
             else:
                 raise ValueError("Must specify either size or quote_size")
 
@@ -301,6 +314,90 @@ class CoinbaseClient:
             return pair_2
         return None
 
+    def get_product_details(self, product_id: str, force_refresh: bool = False) -> Dict:
+        """
+        Get detailed product information including size precision.
+
+        Args:
+            product_id: Trading pair (e.g., 'BTC-USD')
+            force_refresh: Force refresh of cache
+
+        Returns:
+            Dictionary with product details including base_increment and quote_increment
+        """
+        # Check cache validity (1 hour = 3600 seconds)
+        current_time = time.time()
+        if (not force_refresh and product_id in self._product_details_cache and
+            self._product_cache_timestamp is not None and
+            current_time - self._product_cache_timestamp < 3600):
+            return self._product_details_cache[product_id]
+
+        try:
+            product = self.client.get_product(product_id)
+
+            details = {
+                'product_id': product_id,
+                'base_increment': '0.00000001',  # Default to 8 decimals
+                'quote_increment': '0.01',  # Default to 2 decimals
+            }
+
+            # Extract base_increment if available
+            if hasattr(product, 'base_increment'):
+                details['base_increment'] = str(product.base_increment)
+            elif isinstance(product, dict) and 'base_increment' in product:
+                details['base_increment'] = str(product['base_increment'])
+
+            # Extract quote_increment if available
+            if hasattr(product, 'quote_increment'):
+                details['quote_increment'] = str(product.quote_increment)
+            elif isinstance(product, dict) and 'quote_increment' in product:
+                details['quote_increment'] = str(product['quote_increment'])
+
+            # Cache the result
+            self._product_details_cache[product_id] = details
+            if self._product_cache_timestamp is None:
+                self._product_cache_timestamp = current_time
+
+            self.logger.debug(f"Product details for {product_id}: base_increment={details['base_increment']}, quote_increment={details['quote_increment']}")
+
+            return details
+
+        except Exception as e:
+            self.logger.warning(f"Error fetching product details for {product_id}: {e}. Using defaults.")
+            # Return defaults if API call fails
+            return {
+                'product_id': product_id,
+                'base_increment': '0.00000001',
+                'quote_increment': '0.01',
+            }
+
+    def round_size_to_increment(self, size: float, increment: str) -> str:
+        """
+        Round a size value to match the product's increment precision.
+
+        Args:
+            size: The size to round
+            increment: The increment string (e.g., '0.00000001')
+
+        Returns:
+            Rounded size as string with correct precision
+        """
+        import decimal
+        from decimal import Decimal, ROUND_DOWN
+
+        # Convert increment to Decimal for precision
+        inc = Decimal(increment)
+
+        # Get number of decimal places from increment
+        decimal_places = abs(inc.as_tuple().exponent)
+
+        # Round down to the increment
+        size_decimal = Decimal(str(size))
+        rounded = (size_decimal / inc).quantize(Decimal('1'), rounding=ROUND_DOWN) * inc
+
+        # Format to string with correct decimal places
+        return f"{rounded:.{decimal_places}f}"
+
     def get_order(self, order_id: str) -> Dict:
         """
         Get order details by ID with complete fill information.
@@ -380,4 +477,55 @@ class CoinbaseClient:
 
         except Exception as e:
             self.logger.error(f"Error fetching order {order_id}: {e}")
+            raise
+
+    def get_candles(
+        self,
+        product_id: str,
+        start: int,
+        end: int,
+        granularity: str = "ONE_DAY"
+    ) -> Dict:
+        """
+        Get historical candle data for a product.
+
+        Args:
+            product_id: Trading pair (e.g., 'BTC-USD')
+            start: Start time as Unix timestamp
+            end: End time as Unix timestamp
+            granularity: Candle granularity (ONE_MINUTE, FIVE_MINUTE, FIFTEEN_MINUTE,
+                        THIRTY_MINUTE, ONE_HOUR, TWO_HOUR, SIX_HOUR, ONE_DAY)
+
+        Returns:
+            Dictionary with candles data
+        """
+        try:
+            self.logger.debug(f"Fetching candles for {product_id} from {start} to {end}")
+
+            response = self.client.get_candles(
+                product_id=product_id,
+                start=str(start),
+                end=str(end),
+                granularity=granularity
+            )
+
+            # Convert response to dict format
+            result = {'candles': []}
+
+            if hasattr(response, 'candles'):
+                for candle in response.candles:
+                    candle_data = {
+                        'start': candle.start if hasattr(candle, 'start') else None,
+                        'low': candle.low if hasattr(candle, 'low') else None,
+                        'high': candle.high if hasattr(candle, 'high') else None,
+                        'open': candle.open if hasattr(candle, 'open') else None,
+                        'close': candle.close if hasattr(candle, 'close') else None,
+                        'volume': candle.volume if hasattr(candle, 'volume') else None,
+                    }
+                    result['candles'].append(candle_data)
+
+            return result
+
+        except Exception as e:
+            self.logger.error(f"Error fetching candles for {product_id}: {e}")
             raise
