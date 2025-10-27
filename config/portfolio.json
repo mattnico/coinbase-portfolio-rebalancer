@@ -11,12 +11,28 @@
   "rebalancing": {
     "threshold_percent": 5.0,
     "min_trade_value_usd": 1.0,
-    "dry_run": false,
+    "dry_run": true,
     "prefer_direct_routes": true,
     "handle_unknown_assets": "sell"
   },
   "schedule": {
     "interval_hours": 24,
     "enabled": true
+  },
+  "adaptive": {
+    "enabled": true,
+    "portfolios_path": "config/adaptive_portfolios.json",
+    "regime_portfolios": {
+      "bull": "Top_Three",
+      "bear": "Stablecoin_Heavy",
+      "neutral": "Top_Three"
+    },
+    "detector": {
+      "window_days": 30,
+      "bull_threshold": 15.0,
+      "bear_threshold": -10.0
+    },
+    "persistence_days": 14,
+    "check_frequency_days": 7
   }
 }

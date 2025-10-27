@@ -1,0 +1,15 @@
+{
+  "Top_Three": {
+    "BTC": 40.0,
+    "ETH": 40.0,
+    "SOL": 20.0
+  },
+  "Stablecoin_Heavy": {
+    "BTC": 20.0,
+    "ETH": 20.0,
+    "SOL": 10.0,
+    "USDC": 40.0,
+    "DOGE": 5.0,
+    "AVAX": 5.0
+  }
+}

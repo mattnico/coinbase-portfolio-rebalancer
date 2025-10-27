@@ -17,7 +17,16 @@ class RebalanceBot:
         self.config = load_json(config_path)
         self.logger = setup_logging()
         self.scheduler = BlockingScheduler()
-        self.portfolio_manager = PortfolioManager(config_path)
+
+        # Check if adaptive mode is enabled
+        adaptive_config = self.config.get('adaptive', {})
+        if adaptive_config.get('enabled', False):
+            self.logger.info("🔄 Initializing in ADAPTIVE MODE with regime-based allocation")
+            from src.adaptive_portfolio_manager import AdaptivePortfolioManager
+            self.portfolio_manager = AdaptivePortfolioManager(config_path)
+        else:
+            self.logger.info("Initializing in STATIC MODE with fixed allocation")
+            self.portfolio_manager = PortfolioManager(config_path)
 
         # Setup signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -117,6 +126,20 @@ class RebalanceBot:
             print("PORTFOLIO STATUS")
             print("=" * 60)
             print(f"Total Value: ${status['total_value']:,.2f}")
+
+            # Show regime information if in adaptive mode
+            if 'regime' in status:
+                regime_info = status['regime']
+                print("\nMarket Regime:")
+                print("-" * 60)
+                print(f"Current Regime:     {regime_info['current']}")
+                print(f"Detected Regime:    {regime_info['detected']}")
+                print(f"Active Portfolio:   {regime_info['portfolio']}")
+                if regime_info['last_check']:
+                    print(f"Last Check:         {regime_info['last_check']}")
+                if regime_info['regime_buffer']:
+                    print(f"Regime Buffer:      {', '.join(regime_info['regime_buffer'])}")
+
             print("\nAsset Allocation:")
             print("-" * 60)
             print(f"{'Asset':<10} {'Current %':<12} {'Target %':<12} {'Deviation':<12} {'Value':<15}")
