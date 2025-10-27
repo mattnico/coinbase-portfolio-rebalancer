@@ -11,6 +11,13 @@ data/transactions_backup_*.json
 data/transactions.csv
 logs/*.log
 
+# Simulator cache and results
+data/price_cache/
+results/
+heatmaps/
+*.csv
+optimization_results.csv
+
 # Python
 __pycache__/
 *.py[cod]

@@ -55,6 +55,136 @@ python -m src.reporting --asset BTC --days 30
 python -m src.reporting --export-csv
 ```
 
+### Strategy Simulation
+
+```bash
+# Run simulation for last 90 days using current portfolio config
+python -m src.simulate_strategies --days 90
+
+# Simulate specific date range
+python -m src.simulate_strategies --start 2024-01-01 --end 2024-03-31
+
+# Test different rebalancing intervals
+python -m src.simulate_strategies --days 180 --interval-days 7 --threshold 2.5  # Weekly
+python -m src.simulate_strategies --days 7 --interval-hours 6 --threshold 2.5 --granularity ONE_HOUR  # Every 6 hours
+python -m src.simulate_strategies --days 2 --interval-minutes 5 --threshold 2.5 --granularity ONE_HOUR  # Every 5 minutes
+
+# Use custom config and save results
+python -m src.simulate_strategies --config config/portfolio.json --days 60 --output results.json
+
+# Adjust initial capital and fee rate
+python -m src.simulate_strategies --days 90 --initial-capital 50000 --fee-rate 0.006
+
+# Long time periods with caching (1 year of hourly data)
+python -m src.simulate_strategies --days 365 --interval-hours 6 --threshold 2.5 --granularity ONE_HOUR
+
+# Cache management
+python -m src.simulate_strategies --days 90 --no-cache  # Force fresh fetch
+python -m src.simulate_strategies --days 90 --cache-only  # Use cache only, fail if not available
+python -m src.simulate_strategies --days 90 --cache-max-age 30  # Use cache up to 30 days old
+```
+
+The simulator compares different rebalancing strategies using historical price data:
+- **Buy and Hold**: Never rebalances (baseline strategy)
+- **Hybrid Strategy**: Rebalances at fixed intervals (minutes/hours/days) only if threshold is exceeded
+
+Key metrics provided:
+- Total return and annualized return percentages
+- Sharpe ratio (risk-adjusted returns)
+- Maximum drawdown percentage
+- Total fees paid and number of rebalances
+
+**Important**: For intra-day intervals (minutes/hours), use `--granularity ONE_HOUR` to get hourly price data instead of daily.
+
+### Parameter Optimization
+
+Find optimal threshold and interval parameters using grid search:
+
+**Note**: Both `simulate_strategies` and `optimize_strategy` now auto-detect the appropriate data granularity based on your interval. You no longer need to specify `--granularity` unless you want to override the automatic selection.
+
+```bash
+# Optimize threshold (0.5-2.5%) and interval (5-60min) for last 7 days
+python -m src.optimize_strategy \
+  --days 7 \
+  --threshold-min 0.5 --threshold-max 2.5 --threshold-step 0.1 \
+  --interval-min 5 --interval-max 60 --interval-step 5 \
+  --granularity ONE_HOUR \
+  --output optimization_results.csv \
+  --heatmap heatmaps/
+
+# Optimize for longer period with wider ranges
+python -m src.optimize_strategy \
+  --days 30 \
+  --threshold-min 1.0 --threshold-max 5.0 --threshold-step 0.5 \
+  --interval-min 15 --interval-max 240 --interval-step 15 \
+  --granularity ONE_HOUR
+
+# Control parallel processing
+python -m src.optimize_strategy \
+  --days 14 \
+  --threshold-min 0.5 --threshold-max 2.5 --threshold-step 0.25 \
+  --interval-min 5 --interval-max 60 --interval-step 5 \
+  --workers 4 \
+  --granularity ONE_HOUR
+
+# Full year optimization with caching (data fetched once, reused for all combinations)
+python -m src.optimize_strategy \
+  --days 365 \
+  --threshold-min 1.0 --threshold-max 5.0 --threshold-step 0.5 \
+  --interval-min 15 --interval-max 120 --interval-step 15 \
+  --granularity ONE_HOUR \
+  --output year_optimization.csv
+
+# Cache management for optimization
+python -m src.optimize_strategy --days 90 --no-cache ...  # Force fresh fetch
+python -m src.optimize_strategy --days 90 --cache-only ...  # Use cache only
+```
+
+The optimizer tests all combinations in parallel and outputs:
+- Top 10 strategies by total return, Sharpe ratio, and net return
+- Full CSV export of all combinations tested
+- Heatmap visualizations showing performance landscape
+- Comparison vs. buy-and-hold baseline
+
+### Portfolio Allocation Optimization
+
+Test multiple predefined portfolio allocations to find the best combination of allocation + threshold + interval:
+
+```bash
+# Test 7 portfolios × 4 thresholds × 6 intervals = 168 combinations
+python -m src.optimize_portfolios \
+  --days 14 \
+  --portfolios config/test_portfolios.json \
+  --threshold-min 0.5 --threshold-max 2.0 --threshold-step 0.5 \
+  --interval-min 5 --interval-max 30 --interval-step 5 \
+  --output results/portfolio_optimization.csv
+
+# With custom time range and parameters
+python -m src.optimize_portfolios \
+  --start 2024-10-01 --end 2024-10-31 \
+  --portfolios config/test_portfolios.json \
+  --threshold-min 1.0 --threshold-max 3.0 --threshold-step 0.5 \
+  --interval-min 10 --interval-max 60 --interval-step 10
+```
+
+The portfolio optimizer:
+- Tests each portfolio with all threshold/interval combinations
+- Shows which portfolio performed best overall
+- Compares portfolios by total return and Sharpe ratio
+- Exports complete results to CSV
+- Uses cached price data (fetched once, reused for all portfolios)
+
+**Example portfolios** in `config/test_portfolios.json`:
+- Current: Your existing balanced allocation
+- Conservative: Higher stablecoin exposure (25% USDC)
+- Aggressive: No stablecoins, max risk
+- BTC_Dominant: 50% Bitcoin allocation
+- Top_Three: Focus on BTC/ETH/SOL only
+- Equal_Weight: Equal distribution across all 7 assets
+- Stablecoin_Heavy: 40% USDC for maximum stability
+
+You can edit `test_portfolios.json` to add your own custom allocation strategies!
+
 ## Core Architecture
 
 ### Capital-Efficient Trade Routing (Critical Feature)

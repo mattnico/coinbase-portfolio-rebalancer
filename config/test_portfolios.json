@@ -1,0 +1,74 @@
+{
+  "portfolios": {
+    "Current": {
+      "description": "Current balanced allocation",
+      "BTC": 25.0,
+      "ETH": 30.0,
+      "SOL": 20.0,
+      "USDC": 10.0,
+      "DOGE": 5.0,
+      "AVAX": 5.0,
+      "XLM": 5.0
+    },
+    "Conservative": {
+      "description": "Higher stablecoin exposure for stability",
+      "BTC": 30.0,
+      "ETH": 30.0,
+      "SOL": 10.0,
+      "USDC": 25.0,
+      "DOGE": 0.0,
+      "AVAX": 5.0,
+      "XLM": 0.0
+    },
+    "Aggressive": {
+      "description": "No stablecoins, higher risk tolerance",
+      "BTC": 35.0,
+      "ETH": 35.0,
+      "SOL": 25.0,
+      "USDC": 0.0,
+      "DOGE": 5.0,
+      "AVAX": 0.0,
+      "XLM": 0.0
+    },
+    "BTC_Dominant": {
+      "description": "Bitcoin-heavy strategy",
+      "BTC": 50.0,
+      "ETH": 25.0,
+      "SOL": 10.0,
+      "USDC": 10.0,
+      "DOGE": 0.0,
+      "AVAX": 5.0,
+      "XLM": 0.0
+    },
+    "Top_Three": {
+      "description": "Focus on top 3 assets only",
+      "BTC": 40.0,
+      "ETH": 40.0,
+      "SOL": 20.0,
+      "USDC": 0.0,
+      "DOGE": 0.0,
+      "AVAX": 0.0,
+      "XLM": 0.0
+    },
+    "Equal_Weight": {
+      "description": "Equal allocation across all 7 assets",
+      "BTC": 14.3,
+      "ETH": 14.3,
+      "SOL": 14.3,
+      "USDC": 14.3,
+      "DOGE": 14.3,
+      "AVAX": 14.3,
+      "XLM": 14.2
+    },
+    "Stablecoin_Heavy": {
+      "description": "Maximum stablecoin safety",
+      "BTC": 20.0,
+      "ETH": 20.0,
+      "SOL": 10.0,
+      "USDC": 40.0,
+      "DOGE": 5.0,
+      "AVAX": 5.0,
+      "XLM": 0.0
+    }
+  }
+}
