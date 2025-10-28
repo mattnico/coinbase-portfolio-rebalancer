@@ -48,9 +48,17 @@ class ChunkShuffler:
             config: Monte Carlo configuration
         """
         self.config = config
+
+        # Generate seed if not provided
         if config.seed is not None:
-            random.seed(config.seed)
-            np.random.seed(config.seed)
+            self.seed = config.seed
+        else:
+            self.seed = random.randint(0, 2**32 - 1)
+            logger.info(f"Generated random seed: {self.seed}")
+
+        # Set seeds for reproducibility
+        random.seed(self.seed)
+        np.random.seed(self.seed)
 
     def split_into_chunks(
         self,
@@ -148,14 +156,21 @@ class ChunkShuffler:
     def reassemble_chunks(
         self,
         chunks: List[Dict[str, List[Tuple[datetime, float]]]],
-        new_start_date: datetime
+        new_start_date: datetime,
+        target_end_date: Optional[datetime] = None
     ) -> Dict[str, List[Tuple[datetime, float]]]:
         """
-        Reassemble shuffled chunks into continuous price data with new timestamps.
+        Reassemble shuffled chunks into continuous price data using percentage returns.
+
+        This converts each chunk to percentage returns, then applies them sequentially
+        to build a new price path. This preserves real volatility while testing
+        different sequences of market conditions.
 
         Args:
             chunks: List of shuffled chunks
             new_start_date: New starting date for the timeline
+            target_end_date: Optional target end date - if provided, will forward-fill
+                           to reach this date
 
         Returns:
             Price data with reassembled chunks and sequential timestamps
@@ -165,39 +180,112 @@ class ChunkShuffler:
         for chunk in chunks:
             all_assets.update(chunk.keys())
 
-        # Reassemble each asset's price series
+        # Reassemble each asset's price series using returns
         reassembled_data = {}
-        current_date = new_start_date
 
         for asset in all_assets:
             asset_prices = []
+            current_date = new_start_date
 
+            # Start with initial price from first chunk containing this asset
+            current_price = None
             for chunk in chunks:
+                if asset in chunk and chunk[asset]:
+                    current_price = chunk[asset][0][1]
+                    break
+
+            if current_price is None:
+                logger.warning(f"No initial price found for {asset}")
+                continue
+
+            for chunk_idx, chunk in enumerate(chunks):
                 if asset in chunk:
                     chunk_prices = chunk[asset]
 
-                    # Calculate original time deltas within chunk
                     if len(chunk_prices) > 1:
                         original_start = chunk_prices[0][0]
-                        for ts, price in chunk_prices:
-                            # Preserve relative timing within chunk
-                            time_offset = (ts - original_start).total_seconds()
-                            new_ts = current_date + timedelta(seconds=time_offset)
-                            asset_prices.append((new_ts, price))
-                    elif len(chunk_prices) == 1:
-                        asset_prices.append((current_date, chunk_prices[0][1]))
 
-                # Move current_date forward by chunk duration
-                if asset in chunk and chunk[asset]:
-                    chunk_duration = (chunk[asset][-1][0] - chunk[asset][0][0]).total_seconds()
-                    current_date += timedelta(seconds=chunk_duration)
+                        # For first chunk, add the starting price
+                        # For subsequent chunks, add a point at current_date before applying chunk returns
+                        if len(asset_prices) == 0:
+                            # First chunk - add starting price
+                            asset_prices.append((current_date, current_price))
+                        else:
+                            # Subsequent chunks - add current price at current_date as starting point
+                            asset_prices.append((current_date, current_price))
+
+                        # Convert chunk to returns and apply sequentially
+                        # Start from index 1 to calculate returns between consecutive prices
+                        for i in range(1, len(chunk_prices)):
+                            prev_price = chunk_prices[i-1][1]
+                            curr_price_raw = chunk_prices[i][1]
+
+                            # Calculate percentage return
+                            if prev_price > 0:
+                                pct_return = (curr_price_raw - prev_price) / prev_price
+                            else:
+                                pct_return = 0
+
+                            # Apply return to current price
+                            current_price = current_price * (1 + pct_return)
+
+                            # Calculate timestamp - this is relative to start of reassembled timeline
+                            time_offset = (chunk_prices[i][0] - original_start).total_seconds()
+                            new_ts = current_date + timedelta(seconds=time_offset)
+
+                            asset_prices.append((new_ts, current_price))
+
+                        # Move current_date forward by chunk duration PLUS one interval
+                        # This accounts for moving past the last data point to where next chunk starts
+                        if len(chunk_prices) >= 2:
+                            # Calculate typical spacing between data points
+                            spacing = (chunk_prices[1][0] - chunk_prices[0][0]).total_seconds()
+                        else:
+                            spacing = 86400  # Default to 1 day if only one point
+
+                        chunk_duration = (chunk_prices[-1][0] - chunk_prices[0][0]).total_seconds()
+                        current_date += timedelta(seconds=chunk_duration + spacing)
+
+                    elif len(chunk_prices) == 1:
+                        if len(asset_prices) == 0:
+                            asset_prices.append((current_date, current_price))
+                        # For single-price chunks, advance by 1 day
+                        current_date += timedelta(days=1)
+
+                else:
+                    # Asset not in this chunk - need to advance current_date anyway
+                    # Use the duration from another asset's chunk
+                    for other_asset in chunk.keys():
+                        if chunk[other_asset]:
+                            other_prices = chunk[other_asset]
+                            if len(other_prices) >= 2:
+                                spacing = (other_prices[1][0] - other_prices[0][0]).total_seconds()
+                            else:
+                                spacing = 86400
+
+                            chunk_duration = (other_prices[-1][0] - other_prices[0][0]).total_seconds()
+                            current_date += timedelta(seconds=chunk_duration + spacing)
+                            break
 
             reassembled_data[asset] = asset_prices
 
-            # Reset current_date for next asset
-            current_date = new_start_date
+        # If target_end_date specified, forward-fill to reach it
+        if target_end_date is not None:
+            for asset in reassembled_data.keys():
+                asset_prices = reassembled_data[asset]
+                if asset_prices:
+                    last_timestamp, last_price = asset_prices[-1]
 
-        logger.debug(f"Reassembled {len(reassembled_data)} assets from {len(chunks)} chunks")
+                    # If we haven't reached the target end date, forward-fill
+                    if last_timestamp < target_end_date:
+                        current_ts = last_timestamp + timedelta(days=1)
+                        while current_ts <= target_end_date:
+                            asset_prices.append((current_ts, last_price))
+                            current_ts += timedelta(days=1)
+
+                        logger.debug(f"{asset}: Forward-filled from {last_timestamp.date()} to {target_end_date.date()}")
+
+        logger.debug(f"Reassembled {len(reassembled_data)} assets from {len(chunks)} chunks using percentage returns")
         return reassembled_data
 
     def generate_shuffled_timeline(
@@ -215,10 +303,21 @@ class ChunkShuffler:
         Returns:
             Shuffled price data with same format as input
         """
-        # Determine start date
+        # Determine start and end dates from original data
+        all_timestamps = [ts for prices in price_data.values() for ts, _ in prices]
+        if not all_timestamps:
+            logger.warning("No timestamps in price data")
+            return price_data
+
+        original_start = min(all_timestamps)
+        original_end = max(all_timestamps)
+
         if new_start_date is None:
-            all_timestamps = [ts for prices in price_data.values() for ts, _ in prices]
-            new_start_date = min(all_timestamps) if all_timestamps else datetime.now()
+            new_start_date = original_start
+
+        # Calculate target end date to maintain same duration
+        duration = original_end - original_start
+        target_end_date = new_start_date + duration
 
         # Split into chunks
         chunks = self.split_into_chunks(price_data, self.config.chunk_days)
@@ -234,8 +333,8 @@ class ChunkShuffler:
             preserve_end=self.config.preserve_end_chunk
         )
 
-        # Reassemble
-        shuffled_data = self.reassemble_chunks(shuffled_chunks, new_start_date)
+        # Reassemble with target end date to ensure full coverage
+        shuffled_data = self.reassemble_chunks(shuffled_chunks, new_start_date, target_end_date)
 
         return shuffled_data
 
@@ -246,6 +345,7 @@ class MonteCarloResult:
     strategy_name: str
     num_simulations: int
     chunk_days: int
+    seed: int  # Random seed used for reproducibility
 
     # Return distribution
     mean_return: float
@@ -286,6 +386,7 @@ class MonteCarloResult:
             'strategy_name': self.strategy_name,
             'num_simulations': self.num_simulations,
             'chunk_days': self.chunk_days,
+            'seed': self.seed,
             'returns': {
                 'mean': self.mean_return,
                 'median': self.median_return,
@@ -322,6 +423,7 @@ class MonteCarloResult:
         print("=" * 80)
         print(f"Simulations: {self.num_simulations}")
         print(f"Chunk Size: {self.chunk_days} days")
+        print(f"Random Seed: {self.seed} (use --seed {self.seed} to reproduce)")
         print()
         print("RETURNS:")
         print(f"  Mean:       {self.mean_return:>10.2f}%")
@@ -352,7 +454,8 @@ class MonteCarloResult:
 def aggregate_simulation_results(
     results: List['SimulationResult'],
     strategy_name: str,
-    chunk_days: int
+    chunk_days: int,
+    seed: int
 ) -> MonteCarloResult:
     """
     Aggregate results from multiple simulations into summary statistics.
@@ -361,6 +464,7 @@ def aggregate_simulation_results(
         results: List of simulation results
         strategy_name: Name of the strategy
         chunk_days: Chunk size used
+        seed: Random seed used for simulations
 
     Returns:
         Aggregated Monte Carlo results
@@ -380,6 +484,7 @@ def aggregate_simulation_results(
         strategy_name=strategy_name,
         num_simulations=len(results),
         chunk_days=chunk_days,
+        seed=seed,
         # Returns
         mean_return=float(np.mean(returns)),
         median_return=float(np.median(returns)),
