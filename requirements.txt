@@ -2,3 +2,11 @@ coinbase-advanced-py>=1.3.0
 python-dotenv>=1.0.0
 APScheduler>=3.10.0
 requests>=2.31.0
+numpy>=1.24.0
+scipy>=1.10.0
+matplotlib>=3.7.0
+tqdm>=4.65.0
+
+# For advanced Monte Carlo and optimization features
+hmmlearn>=0.3.0  # HMM-based regime detection
+bayesian-optimization>=1.4.0  # Bayesian parameter optimization
