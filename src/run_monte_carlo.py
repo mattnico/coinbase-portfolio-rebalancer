@@ -21,7 +21,8 @@ Usage:
 Performance Notes:
     - Parallelization provides ~3-4x speedup on 8-core machines
     - For 150k simulations: ~6-8 minutes with 12 cores vs ~27 minutes single-threaded
-    - Memory usage: ~50-100 MB per 1000 simulations (plan for 5-10 GB for 100k sims)
+    - Memory-efficient: Keeps only summary metrics + 1000 sampled results for visualization
+    - Memory usage: ~50-100 MB regardless of simulation count (previously scaled linearly)
 """
 
 import argparse
@@ -29,8 +30,9 @@ import logging
 import os
 import sys
 import time
+from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from src.coinbase_client import CoinbaseClient
@@ -44,11 +46,23 @@ from src.monte_carlo_simulator import (
 from src.monte_carlo_chunk_shuffle import (
     ChunkShuffler,
     MonteCarloConfig,
-    aggregate_simulation_results
+    aggregate_simulation_results,
+    aggregate_from_metrics,
+    load_monte_carlo_results,
+    OriginalResult
 )
 from src.adaptive_strategy import AdaptiveRebalancingStrategy
 from src.regime_detector import MarketRegime, ReturnDetector
 from src.monte_carlo_visualization import generate_and_save_chart
+
+# Global variables for worker processes (shared via initializer)
+_worker_price_data: Optional[Dict[str, List[Tuple[datetime, float]]]] = None
+_worker_strategy: Optional[RebalancingStrategy] = None
+_worker_target_allocation: Optional[Dict[str, float]] = None
+_worker_start_date: Optional[datetime] = None
+_worker_end_date: Optional[datetime] = None
+_worker_initial_capital: Optional[float] = None
+_worker_fee_rate: Optional[float] = None
 
 
 def setup_logging(verbose: bool = False):
@@ -60,10 +74,8 @@ def setup_logging(verbose: bool = False):
     )
 
 
-def _run_single_monte_carlo_simulation(
-    sim_index: int,
+def _init_worker(
     price_data: Dict[str, List[Tuple[datetime, float]]],
-    shuffler: ChunkShuffler,
     strategy: RebalancingStrategy,
     target_allocation: Dict[str, float],
     start_date: datetime,
@@ -71,25 +83,65 @@ def _run_single_monte_carlo_simulation(
     initial_capital: float,
     fee_rate: float
 ):
+    """Initialize worker process with shared data (called once per worker)."""
+    global _worker_price_data, _worker_strategy, _worker_target_allocation
+    global _worker_start_date, _worker_end_date, _worker_initial_capital, _worker_fee_rate
+
+    _worker_price_data = price_data
+    _worker_strategy = strategy
+    _worker_target_allocation = target_allocation
+    _worker_start_date = start_date
+    _worker_end_date = end_date
+    _worker_initial_capital = initial_capital
+    _worker_fee_rate = fee_rate
+
+    # Suppress verbose logging in worker processes
+    logging.getLogger('src.monte_carlo_chunk_shuffle').setLevel(logging.WARNING)
+    logging.getLogger('src.monte_carlo_simulator').setLevel(logging.WARNING)
+
+
+def _run_single_monte_carlo_simulation(
+    sim_index: int,
+    chunk_days: int,
+    base_seed: int,
+    keep_full_result: bool = False
+):
     """
-    Run a single Monte Carlo simulation.
+    Run a single Monte Carlo simulation using worker globals.
 
     This function is designed to be pickable for multiprocessing.
+    Data is passed via globals set by _init_worker() to avoid repeated pickling.
 
     Args:
-        sim_index: Simulation index (for logging)
-        price_data: Original price data to shuffle
-        shuffler: ChunkShuffler instance
-        strategy: Rebalancing strategy
-        target_allocation: Target portfolio allocation
-        start_date: Simulation start date
-        end_date: Simulation end date
-        initial_capital: Initial capital in USD
-        fee_rate: Trading fee rate
+        sim_index: Simulation index (for uniqueness)
+        chunk_days: Size of chunks to shuffle in days
+        base_seed: Base random seed (sim_index will be added for uniqueness)
+        keep_full_result: If True, return full SimulationResult; else return metrics only
 
     Returns:
-        SimulationResult from the simulation
+        Either full SimulationResult or dict of metrics (memory-efficient)
     """
+    # Access globals set by initializer
+    price_data = _worker_price_data
+    strategy = _worker_strategy
+    target_allocation = _worker_target_allocation
+    start_date = _worker_start_date
+    end_date = _worker_end_date
+    initial_capital = _worker_initial_capital
+    fee_rate = _worker_fee_rate
+
+    # Create a unique seed for this simulation
+    sim_seed = base_seed + sim_index
+
+    # Create shuffler for this specific simulation
+    mc_config = MonteCarloConfig(
+        chunk_days=chunk_days,
+        num_simulations=1,
+        preserve_start_chunk=True,
+        seed=sim_seed
+    )
+    shuffler = ChunkShuffler(mc_config)
+
     # Generate shuffled timeline
     shuffled_data = shuffler.generate_shuffled_timeline(
         price_data,
@@ -114,7 +166,19 @@ def _run_single_monte_carlo_simulation(
 
     result = simulator.run()
 
-    return result
+    # Memory optimization: Return only lightweight metrics unless full result requested
+    if keep_full_result:
+        return result
+    else:
+        # Extract only what we need for aggregation (tiny memory footprint)
+        return {
+            'total_return_percent': result.total_return_percent,
+            'final_value': result.final_value,
+            'sharpe_ratio': result.sharpe_ratio,
+            'max_drawdown_percent': result.max_drawdown_percent,
+            'num_rebalances': result.num_rebalances,
+            'total_fees_paid': result.total_fees_paid
+        }
 
 
 def run_monte_carlo(
@@ -127,7 +191,8 @@ def run_monte_carlo(
     fee_rate: float = 0.006,
     seed: int = None,
     max_workers: int = None,
-    show_progress: bool = True
+    show_progress: bool = True,
+    max_full_results_for_viz: int = 1000
 ):
     """
     Run Monte Carlo simulations with shuffled historical data.
@@ -143,9 +208,10 @@ def run_monte_carlo(
         seed: Random seed for reproducibility
         max_workers: Number of parallel workers (default: CPU count)
         show_progress: Whether to show progress bar
+        max_full_results_for_viz: Max number of full results to keep for visualization (default: 1000)
 
     Returns:
-        MonteCarloResult with aggregated statistics
+        Tuple of (MonteCarloResult, original_result)
     """
     logger = logging.getLogger(__name__)
 
@@ -198,7 +264,20 @@ def run_monte_carlo(
     logger.info(f"Running {num_simulations} simulations using {workers_to_use} workers (system has {cpu_count} CPUs)...")
 
     start_time_sims = time.time()
-    results = []
+
+    # Memory-efficient: Keep only summary metrics + sample of full results
+    summary_metrics = {
+        'returns': [],
+        'final_values': [],
+        'sharpe_ratios': [],
+        'max_drawdowns': [],
+        'num_rebalances': [],
+        'total_fees': []
+    }
+    full_results_for_viz = []  # Keep small sample for visualization
+
+    # Determine sampling rate for visualization
+    viz_sample_rate = max(1, num_simulations // max_full_results_for_viz)
 
     # Initialize progress bar if enabled
     if show_progress:
@@ -211,20 +290,20 @@ def run_monte_carlo(
     else:
         progress_bar = None
 
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all jobs
+    with ProcessPoolExecutor(
+        max_workers=max_workers,
+        initializer=_init_worker,
+        initargs=(price_data, strategy, target_allocation, start_date, end_date, initial_capital, fee_rate)
+    ) as executor:
+        # Submit all jobs - only request full results for sampled indices
+        # Data is passed via initializer to avoid repeated pickling
         futures = {
             executor.submit(
                 _run_single_monte_carlo_simulation,
                 i,
-                price_data,
-                shuffler,
-                strategy,
-                target_allocation,
-                start_date,
-                end_date,
-                initial_capital,
-                fee_rate
+                chunk_days,
+                shuffler.seed,  # Pass base seed, worker will add sim_index for uniqueness
+                keep_full_result=(i % viz_sample_rate == 0 and i // viz_sample_rate < max_full_results_for_viz)
             ): i
             for i in range(num_simulations)
         }
@@ -235,13 +314,42 @@ def run_monte_carlo(
             try:
                 result = future.result()
 
-                # Debug: Check for extreme returns
-                if result.total_return_percent > 100000:  # More than 1000x return
-                    logger.warning(f"⚠️  Simulation {sim_index+1} has extreme return: {result.total_return_percent:.2f}%")
-                    logger.warning(f"   Initial: ${result.initial_value:.2f}, Final: ${result.final_value:.2f}")
-                    logger.warning(f"   Rebalances: {result.num_rebalances}, Fees: ${result.total_fees_paid:.2f}")
+                # Result is either dict (metrics only) or SimulationResult (full)
+                if isinstance(result, dict):
+                    # Lightweight metrics dict
+                    metrics = result
 
-                results.append(result)
+                    # Debug: Check for extreme returns
+                    if metrics['total_return_percent'] > 100000:
+                        logger.warning(f"⚠️  Simulation {sim_index+1} has extreme return: {metrics['total_return_percent']:.2f}%")
+                        logger.warning(f"   Final: ${metrics['final_value']:.2f}")
+                        logger.warning(f"   Rebalances: {metrics['num_rebalances']}, Fees: ${metrics['total_fees_paid']:.2f}")
+
+                    # Store metrics
+                    summary_metrics['returns'].append(metrics['total_return_percent'])
+                    summary_metrics['final_values'].append(metrics['final_value'])
+                    summary_metrics['sharpe_ratios'].append(metrics['sharpe_ratio'])
+                    summary_metrics['max_drawdowns'].append(metrics['max_drawdown_percent'])
+                    summary_metrics['num_rebalances'].append(metrics['num_rebalances'])
+                    summary_metrics['total_fees'].append(metrics['total_fees_paid'])
+                else:
+                    # Full SimulationResult (sampled for visualization)
+                    # Debug: Check for extreme returns
+                    if result.total_return_percent > 100000:
+                        logger.warning(f"⚠️  Simulation {sim_index+1} has extreme return: {result.total_return_percent:.2f}%")
+                        logger.warning(f"   Initial: ${result.initial_value:.2f}, Final: ${result.final_value:.2f}")
+                        logger.warning(f"   Rebalances: {result.num_rebalances}, Fees: ${result.total_fees_paid:.2f}")
+
+                    # Extract summary metrics
+                    summary_metrics['returns'].append(result.total_return_percent)
+                    summary_metrics['final_values'].append(result.final_value)
+                    summary_metrics['sharpe_ratios'].append(result.sharpe_ratio)
+                    summary_metrics['max_drawdowns'].append(result.max_drawdown_percent)
+                    summary_metrics['num_rebalances'].append(result.num_rebalances)
+                    summary_metrics['total_fees'].append(result.total_fees_paid)
+
+                    # Keep for visualization
+                    full_results_for_viz.append(result)
 
                 if progress_bar:
                     progress_bar.update(1)
@@ -255,20 +363,21 @@ def run_monte_carlo(
     elapsed_time = time.time() - start_time_sims
     sims_per_sec = num_simulations / elapsed_time if elapsed_time > 0 else 0
     logger.info(f"\n✅ Completed {num_simulations} simulations in {elapsed_time:.1f}s ({sims_per_sec:.1f} sims/sec)")
+    logger.info(f"   Kept {len(full_results_for_viz)} full results for visualization (sampled every {viz_sample_rate} simulations)")
 
-    # Aggregate results
-    mc_result = aggregate_simulation_results(
-        results,
+    # Aggregate results (memory-efficient version)
+    mc_result = aggregate_from_metrics(
+        metrics=summary_metrics,
         strategy_name=strategy.name,
         chunk_days=chunk_days,
         seed=shuffler.seed
     )
 
-    # Generate equity curve visualization
+    # Generate equity curve visualization using sampled results
     logger.info("Generating equity curve visualization...")
     try:
         chart_path = generate_and_save_chart(
-            mc_results=results,
+            mc_results=full_results_for_viz,
             original_result=original_result,
             strategy_name=strategy.name,
             start_date=start_date,
@@ -279,10 +388,26 @@ def run_monte_carlo(
         )
         if chart_path:
             logger.info(f"Visualization saved to: {chart_path}")
+            logger.info(f"   (based on {len(full_results_for_viz)} sampled simulations)")
     except Exception as e:
         logger.warning(f"Could not generate visualization: {e}")
 
-    return mc_result
+    # Auto-save results to JSON
+    logger.info("Saving results to JSON...")
+    try:
+        # Create filename based on strategy, dates, and simulations
+        strategy_clean = strategy.name.replace(' ', '_').replace('(', '').replace(')', '').replace(',', '').replace('%', 'pct')
+        start_str = start_date.strftime('%Y%m%d')
+        end_str = end_date.strftime('%Y%m%d')
+        json_filename = f"mc_{strategy_clean}_{start_str}_{end_str}_{num_simulations}sims_seed{shuffler.seed}.json"
+        json_path = Path("results") / json_filename
+
+        mc_result.save_to_json(str(json_path), original_result=original_result)
+        logger.info(f"Results saved to: {json_path}")
+    except Exception as e:
+        logger.warning(f"Could not save results to JSON: {e}")
+
+    return mc_result, original_result
 
 
 def parse_arguments():
@@ -291,8 +416,8 @@ def parse_arguments():
         description='Run Monte Carlo simulations with chunk-shuffled historical data'
     )
 
-    # Time period
-    time_group = parser.add_mutually_exclusive_group(required=True)
+    # Time period (not required if loading results)
+    time_group = parser.add_mutually_exclusive_group(required=False)
     time_group.add_argument(
         '--days',
         type=int,
@@ -403,6 +528,12 @@ def parse_arguments():
         help='Disable progress bar'
     )
 
+    parser.add_argument(
+        '--load-results',
+        type=str,
+        help='Load and display previously saved Monte Carlo results from JSON file'
+    )
+
     return parser.parse_args()
 
 
@@ -412,6 +543,27 @@ def main():
 
     setup_logging(args.verbose)
     logger = logging.getLogger(__name__)
+
+    # Handle --load-results mode
+    if args.load_results:
+        logger.info(f"Loading results from {args.load_results}")
+        try:
+            mc_result, original_result = load_monte_carlo_results(args.load_results)
+            mc_result.print_summary(original_result=original_result)
+            print()
+            logger.info("Results displayed successfully")
+            return
+        except FileNotFoundError:
+            logger.error(f"Results file not found: {args.load_results}")
+            sys.exit(1)
+        except Exception as e:
+            logger.error(f"Error loading results: {e}", exc_info=True)
+            sys.exit(1)
+
+    # Validate that either --load-results or time period is provided
+    if not args.days and not args.start:
+        logger.error("Either --days/--start or --load-results must be provided")
+        sys.exit(1)
 
     # Parse dates
     if args.days:
@@ -563,7 +715,7 @@ def main():
         base_allocation = regime_portfolios[MarketRegime.NEUTRAL]
 
         # Run Monte Carlo
-        mc_result = run_monte_carlo(
+        mc_result, original_result = run_monte_carlo(
             price_data=adaptive_price_data,
             strategy=adaptive_strategy,
             target_allocation=base_allocation,
@@ -578,8 +730,8 @@ def main():
 
         all_results['Adaptive'] = mc_result
 
-        # Print results
-        mc_result.print_summary()
+        # Print results with original comparison
+        mc_result.print_summary(original_result=original_result)
 
     # Test static portfolios if requested
     if not args.adaptive or args.compare_adaptive_vs_static:
@@ -601,7 +753,7 @@ def main():
             )
 
             # Run Monte Carlo
-            mc_result = run_monte_carlo(
+            mc_result, original_result = run_monte_carlo(
                 price_data=filtered_price_data,
                 strategy=strategy,
                 target_allocation=target_allocation,
@@ -616,30 +768,33 @@ def main():
 
             all_results[portfolio_name] = mc_result
 
-            # Print results
-            mc_result.print_summary()
+            # Print results with original comparison
+            mc_result.print_summary(original_result=original_result)
 
     # Comparison summary if multiple strategies
     if len(all_results) > 1:
         print("\n" + "=" * 80)
-        print("STRATEGY COMPARISON SUMMARY")
+        print("STRATEGY COMPARISON SUMMARY (Median-Focused)")
         print("=" * 80)
-        print(f"{'Strategy':<20} {'Mean Return':<15} {'Median Return':<15} {'Mean Sharpe':<12} {'Worst DD':<12}")
+        print(f"{'Strategy':<20} {'Median Return':<15} {'Median Sharpe':<14} {'Median DD':<12} {'Worst DD':<12}")
         print("-" * 80)
 
         for name, result in all_results.items():
-            print(f"{name:<20} {result.mean_return:>13.2f}% "
-                  f"{result.median_return:>13.2f}% "
-                  f"{result.mean_sharpe:>10.3f} "
+            print(f"{name:<20} {result.median_return:>13.2f}% "
+                  f"{result.median_sharpe:>12.3f} "
+                  f"{result.median_max_drawdown:>10.2f}% "
                   f"{result.worst_max_drawdown:>10.2f}%")
 
         print("=" * 80)
 
-        # Find winner
+        # Find winner by median return
         winner_name = max(all_results.items(), key=lambda x: x[1].median_return)[0]
+        winner = all_results[winner_name]
         print(f"\n🏆 Winner (by median return): {winner_name}")
-        print(f"   Median Return: {all_results[winner_name].median_return:.2f}%")
-        print(f"   Mean Sharpe: {all_results[winner_name].mean_sharpe:.3f}")
+        print(f"   Median Return:      {winner.median_return:>10.2f}%")
+        print(f"   Median Sharpe:      {winner.median_sharpe:>10.3f}")
+        print(f"   Median Max DD:      {winner.median_max_drawdown:>10.2f}%")
+        print(f"   Worst Drawdown:     {winner.worst_max_drawdown:>10.2f}%")
         print()
 
 

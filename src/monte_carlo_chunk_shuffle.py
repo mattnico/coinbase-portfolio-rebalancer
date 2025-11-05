@@ -16,6 +16,8 @@ This tests strategy robustness to sequence risk and provides distributions of ou
 
 import logging
 import random
+import json
+from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional, TYPE_CHECKING
 from dataclasses import dataclass
@@ -369,6 +371,7 @@ class MonteCarloResult:
     mean_max_drawdown: float
     median_max_drawdown: float
     worst_max_drawdown: float
+    best_max_drawdown: float
 
     # Trading metrics
     mean_num_rebalances: float
@@ -380,9 +383,13 @@ class MonteCarloResult:
     all_sharpe_ratios: List[float]
     all_max_drawdowns: List[float]
 
-    def to_dict(self) -> dict:
-        """Convert to dictionary for JSON serialization."""
-        return {
+    def to_dict(self, include_raw_data: bool = False) -> dict:
+        """Convert to dictionary for JSON serialization.
+
+        Args:
+            include_raw_data: If True, include raw distribution arrays (larger file)
+        """
+        result = {
             'strategy_name': self.strategy_name,
             'num_simulations': self.num_simulations,
             'chunk_days': self.chunk_days,
@@ -408,7 +415,8 @@ class MonteCarloResult:
                 'median_sharpe': self.median_sharpe,
                 'mean_max_drawdown': self.mean_max_drawdown,
                 'median_max_drawdown': self.median_max_drawdown,
-                'worst_max_drawdown': self.worst_max_drawdown
+                'worst_max_drawdown': self.worst_max_drawdown,
+                'best_max_drawdown': self.best_max_drawdown
             },
             'trading': {
                 'mean_num_rebalances': self.mean_num_rebalances,
@@ -416,33 +424,96 @@ class MonteCarloResult:
             }
         }
 
-    def print_summary(self):
-        """Print formatted summary of results."""
+        # Include raw distribution arrays if requested
+        if include_raw_data:
+            result['raw_distributions'] = {
+                'returns': self.all_returns,
+                'final_values': self.all_final_values,
+                'sharpe_ratios': self.all_sharpe_ratios,
+                'max_drawdowns': self.all_max_drawdowns
+            }
+
+        return result
+
+    def save_to_json(self, file_path: str, original_result=None):
+        """Save Monte Carlo results to JSON file.
+
+        Args:
+            file_path: Path to save JSON file
+            original_result: Optional SimulationResult from original (unshuffled) run
+        """
+        output = {
+            'monte_carlo': self.to_dict(include_raw_data=True),
+            'metadata': {
+                'saved_at': datetime.now().isoformat(),
+                'version': '1.0'
+            }
+        }
+
+        # Add original result if provided
+        if original_result:
+            output['original_result'] = {
+                'total_return_percent': original_result.total_return_percent,
+                'annualized_return_percent': original_result.annualized_return_percent,
+                'sharpe_ratio': original_result.sharpe_ratio,
+                'max_drawdown_percent': original_result.max_drawdown_percent,
+                'num_rebalances': original_result.num_rebalances,
+                'total_fees_paid': original_result.total_fees_paid,
+                'initial_value': original_result.initial_value,
+                'final_value': original_result.final_value
+            }
+
+        # Create parent directory if needed
+        Path(file_path).parent.mkdir(parents=True, exist_ok=True)
+
+        # Save to file
+        with open(file_path, 'w') as f:
+            json.dump(output, f, indent=2)
+
+        logger.info(f"Saved Monte Carlo results to {file_path}")
+
+    def print_summary(self, original_result=None):
+        """Print formatted summary of results with optional original strategy comparison."""
         print("\n" + "=" * 80)
         print(f"MONTE CARLO RESULTS: {self.strategy_name}")
         print("=" * 80)
-        print(f"Simulations: {self.num_simulations}")
+        print(f"Simulations: {self.num_simulations:,}")
         print(f"Chunk Size: {self.chunk_days} days")
         print(f"Random Seed: {self.seed} (use --seed {self.seed} to reproduce)")
         print()
-        print("RETURNS:")
+
+        # Original strategy comparison if provided
+        if original_result:
+            print("ORIGINAL (UNSHUFFLED) STRATEGY:")
+            print(f"  Return:             {original_result.total_return_percent:>10.2f}%")
+            print(f"  Sharpe Ratio:       {original_result.sharpe_ratio:>10.3f}")
+            print(f"  Max Drawdown:       {original_result.max_drawdown_percent:>10.2f}%")
+            print(f"  Rebalances:         {original_result.num_rebalances:>10.0f}")
+            print(f"  Fees Paid:          ${original_result.total_fees_paid:>10,.2f}")
+            print()
+
+        print("MONTE CARLO DISTRIBUTIONS:")
+        print()
+        print("RETURNS (emphasis on median):")
+        print(f"  Median:     {self.median_return:>10.2f}%  ⭐")
         print(f"  Mean:       {self.mean_return:>10.2f}%")
-        print(f"  Median:     {self.median_return:>10.2f}%")
         print(f"  Std Dev:    {self.std_return:>10.2f}%")
         print(f"  5th %ile:   {self.percentile_5_return:>10.2f}%")
         print(f"  95th %ile:  {self.percentile_95_return:>10.2f}%")
         print(f"  Range:      {self.min_return:>10.2f}% to {self.max_return:>10.2f}%")
         print()
         print("FINAL VALUES:")
+        print(f"  Median:     ${self.median_final_value:>12,.2f}  ⭐")
         print(f"  Mean:       ${self.mean_final_value:>12,.2f}")
-        print(f"  Median:     ${self.median_final_value:>12,.2f}")
         print(f"  5th %ile:   ${self.percentile_5_final_value:>12,.2f}")
         print(f"  95th %ile:  ${self.percentile_95_final_value:>12,.2f}")
         print()
         print("RISK METRICS:")
+        print(f"  Median Sharpe:      {self.median_sharpe:>8.3f}  ⭐")
         print(f"  Mean Sharpe:        {self.mean_sharpe:>8.3f}")
-        print(f"  Median Sharpe:      {self.median_sharpe:>8.3f}")
-        print(f"  Mean Max Drawdown:  {self.mean_max_drawdown:>8.2f}%")
+        print(f"  Median Max DD:      {self.median_max_drawdown:>8.2f}%  ⭐")
+        print(f"  Mean Max DD:        {self.mean_max_drawdown:>8.2f}%")
+        print(f"  Best Drawdown:      {self.best_max_drawdown:>8.2f}%")
         print(f"  Worst Drawdown:     {self.worst_max_drawdown:>8.2f}%")
         print()
         print("TRADING:")
@@ -505,6 +576,160 @@ def aggregate_simulation_results(
         mean_max_drawdown=float(np.mean(max_drawdowns)),
         median_max_drawdown=float(np.median(max_drawdowns)),
         worst_max_drawdown=float(np.max(max_drawdowns)),
+        best_max_drawdown=float(np.min(max_drawdowns)),
+        # Trading
+        mean_num_rebalances=float(np.mean(num_rebalances)),
+        mean_total_fees=float(np.mean(total_fees)),
+        # Raw data
+        all_returns=returns,
+        all_final_values=final_values,
+        all_sharpe_ratios=sharpe_ratios,
+        all_max_drawdowns=max_drawdowns
+    )
+
+
+@dataclass
+class OriginalResult:
+    """Simplified result from original (unshuffled) strategy run."""
+    total_return_percent: float
+    annualized_return_percent: float
+    sharpe_ratio: float
+    max_drawdown_percent: float
+    num_rebalances: int
+    total_fees_paid: float
+    initial_value: float
+    final_value: float
+
+
+def load_monte_carlo_results(file_path: str) -> Tuple[MonteCarloResult, Optional[OriginalResult]]:
+    """Load Monte Carlo results from JSON file.
+
+    Args:
+        file_path: Path to JSON file
+
+    Returns:
+        Tuple of (MonteCarloResult, OriginalResult or None)
+    """
+    with open(file_path, 'r') as f:
+        data = json.load(f)
+
+    mc_data = data['monte_carlo']
+    raw_dist = mc_data.get('raw_distributions', {})
+
+    # Reconstruct MonteCarloResult
+    mc_result = MonteCarloResult(
+        strategy_name=mc_data['strategy_name'],
+        num_simulations=mc_data['num_simulations'],
+        chunk_days=mc_data['chunk_days'],
+        seed=mc_data['seed'],
+        # Returns
+        mean_return=mc_data['returns']['mean'],
+        median_return=mc_data['returns']['median'],
+        std_return=mc_data['returns']['std'],
+        percentile_5_return=mc_data['returns']['percentile_5'],
+        percentile_95_return=mc_data['returns']['percentile_95'],
+        min_return=mc_data['returns']['min'],
+        max_return=mc_data['returns']['max'],
+        # Final values
+        mean_final_value=mc_data['final_values']['mean'],
+        median_final_value=mc_data['final_values']['median'],
+        std_final_value=mc_data['final_values']['std'],
+        percentile_5_final_value=mc_data['final_values']['percentile_5'],
+        percentile_95_final_value=mc_data['final_values']['percentile_95'],
+        # Risk metrics
+        mean_sharpe=mc_data['risk_metrics']['mean_sharpe'],
+        median_sharpe=mc_data['risk_metrics']['median_sharpe'],
+        mean_max_drawdown=mc_data['risk_metrics']['mean_max_drawdown'],
+        median_max_drawdown=mc_data['risk_metrics']['median_max_drawdown'],
+        worst_max_drawdown=mc_data['risk_metrics']['worst_max_drawdown'],
+        best_max_drawdown=mc_data['risk_metrics']['best_max_drawdown'],
+        # Trading
+        mean_num_rebalances=mc_data['trading']['mean_num_rebalances'],
+        mean_total_fees=mc_data['trading']['mean_total_fees'],
+        # Raw data (if available)
+        all_returns=raw_dist.get('returns', []),
+        all_final_values=raw_dist.get('final_values', []),
+        all_sharpe_ratios=raw_dist.get('sharpe_ratios', []),
+        all_max_drawdowns=raw_dist.get('max_drawdowns', [])
+    )
+
+    # Load original result if present
+    original_result = None
+    if 'original_result' in data:
+        orig = data['original_result']
+        original_result = OriginalResult(
+            total_return_percent=orig['total_return_percent'],
+            annualized_return_percent=orig['annualized_return_percent'],
+            sharpe_ratio=orig['sharpe_ratio'],
+            max_drawdown_percent=orig['max_drawdown_percent'],
+            num_rebalances=orig['num_rebalances'],
+            total_fees_paid=orig['total_fees_paid'],
+            initial_value=orig['initial_value'],
+            final_value=orig['final_value']
+        )
+
+    logger.info(f"Loaded Monte Carlo results from {file_path}")
+    logger.info(f"  Simulations: {mc_result.num_simulations:,}")
+    logger.info(f"  Strategy: {mc_result.strategy_name}")
+
+    return mc_result, original_result
+
+
+def aggregate_from_metrics(
+    metrics: Dict[str, List[float]],
+    strategy_name: str,
+    chunk_days: int,
+    seed: int
+) -> MonteCarloResult:
+    """
+    Aggregate results from pre-extracted summary metrics (memory-efficient).
+
+    Args:
+        metrics: Dict with keys 'returns', 'final_values', 'sharpe_ratios',
+                'max_drawdowns', 'num_rebalances', 'total_fees'
+        strategy_name: Name of the strategy
+        chunk_days: Chunk size used
+        seed: Random seed used for simulations
+
+    Returns:
+        Aggregated Monte Carlo results
+    """
+    returns = metrics['returns']
+    final_values = metrics['final_values']
+    sharpe_ratios = metrics['sharpe_ratios']
+    max_drawdowns = metrics['max_drawdowns']
+    num_rebalances = metrics['num_rebalances']
+    total_fees = metrics['total_fees']
+
+    if not returns:
+        raise ValueError("No simulation metrics to aggregate")
+
+    return MonteCarloResult(
+        strategy_name=strategy_name,
+        num_simulations=len(returns),
+        chunk_days=chunk_days,
+        seed=seed,
+        # Returns
+        mean_return=float(np.mean(returns)),
+        median_return=float(np.median(returns)),
+        std_return=float(np.std(returns)),
+        percentile_5_return=float(np.percentile(returns, 5)),
+        percentile_95_return=float(np.percentile(returns, 95)),
+        min_return=float(np.min(returns)),
+        max_return=float(np.max(returns)),
+        # Final values
+        mean_final_value=float(np.mean(final_values)),
+        median_final_value=float(np.median(final_values)),
+        std_final_value=float(np.std(final_values)),
+        percentile_5_final_value=float(np.percentile(final_values, 5)),
+        percentile_95_final_value=float(np.percentile(final_values, 95)),
+        # Risk metrics
+        mean_sharpe=float(np.mean(sharpe_ratios)),
+        median_sharpe=float(np.median(sharpe_ratios)),
+        mean_max_drawdown=float(np.mean(max_drawdowns)),
+        median_max_drawdown=float(np.median(max_drawdowns)),
+        worst_max_drawdown=float(np.max(max_drawdowns)),
+        best_max_drawdown=float(np.min(max_drawdowns)),
         # Trading
         mean_num_rebalances=float(np.mean(num_rebalances)),
         mean_total_fees=float(np.mean(total_fees)),
